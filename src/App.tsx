@@ -20,7 +20,8 @@ import {
   Check,
   MapPin,
   Search,
-  Loader2
+  Loader2,
+  Building2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -85,63 +86,103 @@ function calculateHaversineDistance(lat1: number, lon1: number, lat2: number, lo
 // --- Components ---
 
 export default function App() {
-  // State
+  // Global Settings & History
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
-  const [destination, setDestination] = useState<Location | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [suggestions, setSuggestions] = useState<Location[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [activeFees, setActiveFees] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<CalculationResult[]>([]);
   const [isCalculating, setIsCalculating] = useState(false);
+  const [activeFees, setActiveFees] = useState<Set<string>>(new Set());
+
+  // Destination Search State
+  const [destination, setDestination] = useState<Location | null>(null);
+  const [destQuery, setDestQuery] = useState('');
+  const [destSuggestions, setDestSuggestions] = useState<Location[]>([]);
+  const [isSearchingDest, setIsSearchingDest] = useState(false);
+
+  // Origin Search State (for Settings)
+  const [tempOrigin, setTempOrigin] = useState<Location>(DEFAULT_SETTINGS.fixedOrigin);
+  const [originQuery, setOriginQuery] = useState('');
+  const [originSuggestions, setOriginSuggestions] = useState<Location[]>([]);
+  const [isSearchingOrigin, setIsSearchingOrigin] = useState(false);
 
   // Load settings and history
   useEffect(() => {
-    const savedSettings = localStorage.getItem('geocalc_settings_v3');
-    if (savedSettings) setSettings(JSON.parse(savedSettings));
+    const savedSettings = localStorage.getItem('geocalc_settings_v4');
+    if (savedSettings) {
+      const parsed = JSON.parse(savedSettings);
+      setSettings(parsed);
+      setTempOrigin(parsed.fixedOrigin);
+      setOriginQuery(parsed.fixedOrigin.label);
+    }
 
-    const savedHistory = localStorage.getItem('geocalc_history_v3');
+    const savedHistory = localStorage.getItem('geocalc_history_v4');
     if (savedHistory) setHistory(JSON.parse(savedHistory));
   }, []);
 
-  // Save settings
-  const saveSettings = (newSettings: AppSettings) => {
-    setSettings(newSettings);
-    localStorage.setItem('geocalc_settings_v3', JSON.stringify(newSettings));
-    setShowSettings(false);
-  };
-
-  // Search Logic
-  const handleSearch = useCallback(async (query: string) => {
-    if (query.length < 3) {
-      setSuggestions([]);
-      return;
+  // Sync origin search state when settings modal opens
+  useEffect(() => {
+    if (showSettings) {
+      setTempOrigin(settings.fixedOrigin);
+      setOriginQuery(settings.fixedOrigin.label);
     }
-    setIsSearching(true);
+  }, [showSettings, settings.fixedOrigin]);
+
+  // Generic Search Function
+  const fetchLocations = async (query: string) => {
+    if (query.length < 3) return [];
     try {
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`);
+      // Nominatim search with addressdetails to help identify establishments
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=6&addressdetails=1&countrycodes=br`);
       const data = await response.json();
-      const results = data.map((item: any) => ({
+      return data.map((item: any) => ({
         label: item.display_name,
         lat: parseFloat(item.lat),
         lon: parseFloat(item.lon)
       }));
-      setSuggestions(results);
     } catch (error) {
       console.error('Search error:', error);
-    } finally {
-      setIsSearching(false);
+      return [];
     }
-  }, []);
+  };
 
-  // Debounced search effect
+  // Debounced Destination Search
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (searchQuery) handleSearch(searchQuery);
-    }, 500);
+    const timer = setTimeout(async () => {
+      if (destQuery && (!destination || destQuery !== destination.label)) {
+        setIsSearchingDest(true);
+        const results = await fetchLocations(destQuery);
+        setDestSuggestions(results);
+        setIsSearchingDest(false);
+      } else {
+        setDestSuggestions([]);
+        if (!destQuery) setDestination(null);
+      }
+    }, 600);
     return () => clearTimeout(timer);
-  }, [searchQuery, handleSearch]);
+  }, [destQuery, destination]);
+
+  // Debounced Origin Search (Settings)
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (originQuery && originQuery !== tempOrigin.label) {
+        setIsSearchingOrigin(true);
+        const results = await fetchLocations(originQuery);
+        setOriginSuggestions(results);
+        setIsSearchingOrigin(false);
+      } else {
+        setOriginSuggestions([]);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [originQuery, tempOrigin]);
+
+  // Save settings
+  const saveSettings = () => {
+    const newSettings = { ...settings, fixedOrigin: tempOrigin };
+    setSettings(newSettings);
+    localStorage.setItem('geocalc_settings_v4', JSON.stringify(newSettings));
+    setShowSettings(false);
+  };
 
   // Toggle Fee
   const toggleFee = (fee: string) => {
@@ -193,11 +234,11 @@ export default function App() {
       
       const newHistory = [result, ...history].slice(0, 10);
       setHistory(newHistory);
-      localStorage.setItem('geocalc_history_v3', JSON.stringify(newHistory));
+      localStorage.setItem('geocalc_history_v4', JSON.stringify(newHistory));
       setIsCalculating(false);
       
       // Reset search
-      setSearchQuery('');
+      setDestQuery('');
       setDestination(null);
       setActiveFees(new Set());
     }, 800);
@@ -221,7 +262,7 @@ export default function App() {
               <Zap className="text-emerald-400 fill-emerald-400/20" size={24} />
               GEOCALC <span className="text-emerald-400">PRO</span>
             </h1>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-white/40 font-medium">Real-Time Logistics Engine</p>
+            <p className="text-[10px] uppercase tracking-[0.2em] text-white/40 font-medium">Logistics Engine v4.0</p>
           </div>
           <button 
             onClick={() => setShowSettings(true)}
@@ -249,34 +290,34 @@ export default function App() {
                 <Search size={18} className="text-white/40" />
                 <input 
                   type="text" 
-                  placeholder="Pesquisar destino..." 
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Ex: Atacadão, Supermercado ou Endereço..." 
+                  value={destQuery}
+                  onChange={(e) => setDestQuery(e.target.value)}
                   className="w-full bg-transparent border-none focus:ring-0 text-sm placeholder:text-white/20 p-0"
                 />
-                {isSearching && <Loader2 size={16} className="animate-spin text-emerald-400" />}
+                {isSearchingDest && <Loader2 size={16} className="animate-spin text-emerald-400" />}
               </div>
 
               {/* Suggestions Dropdown */}
               <AnimatePresence>
-                {suggestions.length > 0 && (
+                {destSuggestions.length > 0 && (
                   <motion.div 
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
-                    className="absolute top-full left-0 right-0 mt-2 bg-[#0A0A0A] border border-white/10 rounded-2xl overflow-hidden z-50 shadow-2xl"
+                    className="absolute top-full left-0 right-0 mt-2 bg-[#0A0A0A] border border-white/10 rounded-2xl overflow-hidden z-50 shadow-2xl max-h-60 overflow-y-auto"
                   >
-                    {suggestions.map((loc, idx) => (
+                    {destSuggestions.map((loc, idx) => (
                       <button 
                         key={idx}
                         onClick={() => {
                           setDestination(loc);
-                          setSearchQuery(loc.label);
-                          setSuggestions([]);
+                          setDestQuery(loc.label);
+                          setDestSuggestions([]);
                         }}
                         className="w-full px-4 py-3 text-left text-xs text-white/70 hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3"
                       >
-                        <MapPin size={14} className="mt-0.5 shrink-0 text-white/30" />
+                        <Building2 size={14} className="mt-0.5 shrink-0 text-white/30" />
                         <span className="line-clamp-2">{loc.label}</span>
                       </button>
                     ))}
@@ -448,35 +489,37 @@ export default function App() {
                   <div className="space-y-2 relative">
                     <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Origem Base (Fixo)</label>
                     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 flex items-center gap-3 focus-within:border-emerald-500/50 transition-colors">
-                      <MapPin size={18} className="text-emerald-400" />
+                      <MapPin size={18} className="text-emerald-400 shrink-0" />
                       <input 
                         type="text" 
-                        placeholder="Pesquisar origem..." 
-                        defaultValue={settings.fixedOrigin.label}
-                        onChange={(e) => handleSearch(e.target.value)}
+                        placeholder="Pesquisar origem (ex: Atacadão)..." 
+                        value={originQuery}
+                        onChange={(e) => setOriginQuery(e.target.value)}
                         className="bg-transparent border-none focus:ring-0 text-sm font-medium w-full p-0"
                       />
+                      {isSearchingOrigin && <Loader2 size={16} className="animate-spin text-emerald-400" />}
                     </div>
                     
                     {/* Suggestions for Settings */}
                     <AnimatePresence>
-                      {suggestions.length > 0 && (
+                      {originSuggestions.length > 0 && (
                         <motion.div 
                           initial={{ opacity: 0, y: -10 }}
                           animate={{ opacity: 1, y: 0 }}
                           exit={{ opacity: 0, y: -10 }}
-                          className="absolute top-full left-0 right-0 mt-2 bg-[#111] border border-white/10 rounded-2xl overflow-hidden z-[60] shadow-2xl"
+                          className="absolute top-full left-0 right-0 mt-2 bg-[#111] border border-white/10 rounded-2xl overflow-hidden z-[60] shadow-2xl max-h-48 overflow-y-auto"
                         >
-                          {suggestions.map((loc, idx) => (
+                          {originSuggestions.map((loc, idx) => (
                             <button 
                               key={idx}
                               onClick={() => {
-                                setSettings({...settings, fixedOrigin: loc});
-                                setSuggestions([]);
+                                setTempOrigin(loc);
+                                setOriginQuery(loc.label);
+                                setOriginSuggestions([]);
                               }}
                               className="w-full px-4 py-3 text-left text-xs text-white/70 hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3"
                             >
-                              <MapPin size={14} className="mt-0.5 shrink-0 text-white/30" />
+                              <Building2 size={14} className="mt-0.5 shrink-0 text-white/30" />
                               <span className="line-clamp-2">{loc.label}</span>
                             </button>
                           ))}
@@ -523,7 +566,7 @@ export default function App() {
                 </div>
 
                 <button 
-                  onClick={() => saveSettings(settings)}
+                  onClick={saveSettings}
                   className="w-full py-4 bg-white text-black rounded-2xl font-bold uppercase tracking-widest text-sm flex items-center justify-center gap-2 hover:bg-emerald-400 transition-colors"
                 >
                   <Save size={18} />
