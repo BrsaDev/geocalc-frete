@@ -1,0 +1,5 @@
+{
+  "name": "GeoCalc Pro",
+  "description": "Calculadora futurista de fretes e trajetos baseada em distância e adicionais personalizáveis.",
+  "requestFramePermissions": ["geolocation"]
+}
