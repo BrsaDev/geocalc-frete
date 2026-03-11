@@ -21,9 +21,23 @@ import {
   MapPin,
   Search,
   Loader2,
-  Building2
+  Building2,
+  Map as MapIcon,
+  Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// Fix Leaflet icon issue
+// @ts-ignore
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
 
 // --- Types ---
 
@@ -73,7 +87,29 @@ const DEFAULT_SETTINGS: AppSettings = {
 // --- Utils ---
 
 /**
- * Calculates the distance between two points in KM using the Haversine formula.
+ * Fetches real driving distance between two points using OSRM API.
+ */
+async function fetchDrivingDistance(lat1: number, lon1: number, lat2: number, lon2: number): Promise<number> {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=false`;
+    const response = await fetch(url);
+    const data = await response.json();
+    
+    if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+      // OSRM returns distance in meters
+      return data.routes[0].distance / 1000;
+    }
+    
+    // Fallback to Haversine if OSRM fails
+    return calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4; // Add 40% as estimate for urban routes
+  } catch (error) {
+    console.error('Routing error:', error);
+    return calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
+  }
+}
+
+/**
+ * Calculates the distance between two points in KM using the Haversine formula (as fallback).
  */
 function calculateHaversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371; // Earth's radius in km
@@ -102,6 +138,10 @@ export default function App() {
   const [destQuery, setDestQuery] = useState('');
   const [destSuggestions, setDestSuggestions] = useState<Location[]>([]);
   const [isSearchingDest, setIsSearchingDest] = useState(false);
+
+  // Route State
+  const [realDistance, setRealDistance] = useState<number>(0);
+  const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
 
   // Origin Search State (for Settings)
   const [tempOrigin, setTempOrigin] = useState<Location>(DEFAULT_SETTINGS.fixedOrigin);
@@ -140,21 +180,43 @@ export default function App() {
     if (query.length < 3) return [];
     try {
       // Bounding box for Rio das Ostras, Macaé, Cabo Frio, São Pedro da Aldeia
-      // Format: left, top, right, bottom (lon, lat, lon, lat)
-      const viewbox = '-42.2,-22.3,-41.7,-23.0'; 
+      // West: -42.2, North: -22.2, East: -41.6, South: -23.0
+      const viewbox = '-42.2,-22.2,-41.6,-23.0'; 
       
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=8&addressdetails=1&countrycodes=br&viewbox=${viewbox}&bounded=0`;
+      // We add "RJ" to help focus on the state
+      let enhancedQuery = query;
+      if (!query.toLowerCase().includes('rj') && !query.toLowerCase().includes('rio de janeiro')) {
+        enhancedQuery += ', RJ';
+      }
+
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(enhancedQuery)}&limit=12&addressdetails=1&countrycodes=br&viewbox=${viewbox}&bounded=0`;
       
       const response = await fetch(url);
       const data = await response.json();
       
-      // Filter results to ensure they are at least in RJ if possible, 
-      // but Nominatim already biases with viewbox.
-      return data.map((item: any) => ({
-        label: item.display_name,
-        lat: parseFloat(item.lat),
-        lon: parseFloat(item.lon)
-      }));
+      return data.map((item: any) => {
+        const addr = item.address;
+        // Construct a more readable label: "Name/Street, Neighborhood - City, State"
+        const name = item.name || addr.road || addr.pedestrian || addr.suburb || addr.city_district;
+        const neighborhood = addr.suburb || addr.neighbourhood || addr.city_district || addr.village;
+        const city = addr.city || addr.town || addr.municipality;
+        const state = addr.state || 'RJ';
+        
+        let mainLabel = name;
+        if (neighborhood && neighborhood !== name) mainLabel += `, ${neighborhood}`;
+        
+        let subLabel = '';
+        if (city) subLabel += city;
+        if (state) subLabel += subLabel ? `, ${state}` : state;
+
+        return {
+          label: item.display_name,
+          displayLabel: mainLabel,
+          secondaryLabel: subLabel,
+          lat: parseFloat(item.lat),
+          lon: parseFloat(item.lon)
+        };
+      });
     } catch (error) {
       console.error('Search error:', error);
       return [];
@@ -171,11 +233,32 @@ export default function App() {
         setIsSearchingDest(false);
       } else {
         setDestSuggestions([]);
-        if (!destQuery) setDestination(null);
+        if (!destQuery) {
+          setDestination(null);
+          setRealDistance(0);
+        }
       }
     }, 600);
     return () => clearTimeout(timer);
   }, [destQuery, destination]);
+
+  // Real Driving Distance Effect
+  useEffect(() => {
+    const updateRoute = async () => {
+      if (destination) {
+        setIsCalculatingRoute(true);
+        const dist = await fetchDrivingDistance(
+          settings.fixedOrigin.lat,
+          settings.fixedOrigin.lon,
+          destination.lat,
+          destination.lon
+        );
+        setRealDistance(parseFloat(dist.toFixed(2)));
+        setIsCalculatingRoute(false);
+      }
+    };
+    updateRoute();
+  }, [destination, settings.fixedOrigin]);
 
   // Debounced Origin Search (Settings)
   useEffect(() => {
@@ -210,16 +293,9 @@ export default function App() {
 
   // Calculation Logic
   const currentResult = useMemo(() => {
-    if (!destination) return { distance: 0, basePrice: 0, additionalFees: 0, totalPrice: 0 };
+    if (!destination || realDistance === 0) return { distance: 0, basePrice: 0, additionalFees: 0, totalPrice: 0 };
 
-    const dist = calculateHaversineDistance(
-      settings.fixedOrigin.lat, 
-      settings.fixedOrigin.lon, 
-      destination.lat, 
-      destination.lon
-    );
-    
-    const basePrice = dist * settings.pricePerKm;
+    const basePrice = realDistance * settings.pricePerKm;
     
     let additionalFees = 0;
     if (activeFees.has('weight')) additionalFees += settings.extraWeightFee;
@@ -228,15 +304,15 @@ export default function App() {
     if (activeFees.has('traffic')) additionalFees += settings.trafficFee;
 
     return {
-      distance: parseFloat(dist.toFixed(2)),
+      distance: realDistance,
       basePrice,
       additionalFees,
       totalPrice: basePrice + additionalFees
     };
-  }, [destination, settings, activeFees]);
+  }, [destination, realDistance, settings, activeFees]);
 
   const handleCalculate = () => {
-    if (!destination) return;
+    if (!destination || realDistance === 0) return;
     
     setIsCalculating(true);
     setTimeout(() => {
@@ -256,6 +332,7 @@ export default function App() {
       // Reset search
       setDestQuery('');
       setDestination(null);
+      setRealDistance(0);
       setActiveFees(new Set());
     }, 800);
   };
@@ -306,12 +383,12 @@ export default function App() {
                 <Search size={18} className="text-white/40" />
                 <input 
                   type="text" 
-                  placeholder="Ex: Atacadão, Supermercado ou Endereço..." 
+                  placeholder="Rua, Bairro, Praça, Instituição..." 
                   value={destQuery}
                   onChange={(e) => setDestQuery(e.target.value)}
                   className="w-full bg-transparent border-none focus:ring-0 text-sm placeholder:text-white/20 p-0"
                 />
-                {isSearchingDest && <Loader2 size={16} className="animate-spin text-emerald-400" />}
+                {(isSearchingDest || isCalculatingRoute) && <Loader2 size={16} className="animate-spin text-emerald-400" />}
               </div>
 
               {/* Suggestions Dropdown */}
@@ -323,18 +400,21 @@ export default function App() {
                     exit={{ opacity: 0, y: -10 }}
                     className="absolute top-full left-0 right-0 mt-2 bg-[#0A0A0A] border border-white/10 rounded-2xl overflow-hidden z-50 shadow-2xl max-h-60 overflow-y-auto"
                   >
-                    {destSuggestions.map((loc, idx) => (
+                    {destSuggestions.map((loc: any, idx) => (
                       <button 
                         key={idx}
                         onClick={() => {
                           setDestination(loc);
-                          setDestQuery(loc.label);
+                          setDestQuery(loc.displayLabel);
                           setDestSuggestions([]);
                         }}
-                        className="w-full px-4 py-3 text-left text-xs text-white/70 hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3"
+                        className="w-full px-4 py-3 text-left hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3 transition-colors"
                       >
-                        <Building2 size={14} className="mt-0.5 shrink-0 text-white/30" />
-                        <span className="line-clamp-2">{loc.label}</span>
+                        <Building2 size={14} className="mt-1 shrink-0 text-emerald-400/40" />
+                        <div className="flex flex-col">
+                          <span className="text-xs font-bold text-white/90 line-clamp-1">{loc.displayLabel}</span>
+                          <span className="text-[10px] text-white/40 uppercase tracking-wider">{loc.secondaryLabel}</span>
+                        </div>
                       </button>
                     ))}
                   </motion.div>
@@ -344,24 +424,69 @@ export default function App() {
 
             {destination && (
               <motion.div 
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="grid grid-cols-2 gap-4"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-4"
               >
-                <div className="space-y-2">
-                  <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Distância Real</label>
-                  <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4 flex items-center gap-3">
-                    <Navigation size={18} className="text-emerald-400" />
-                    <span className="text-xl font-bold">{currentResult.distance} <span className="text-xs text-emerald-400/60 font-medium">KM</span></span>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Distância de Rota</label>
+                    <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4 flex items-center gap-3">
+                      <Navigation size={18} className={`text-emerald-400 ${isCalculatingRoute ? 'animate-pulse' : ''}`} />
+                      <span className="text-xl font-bold">
+                        {isCalculatingRoute ? '...' : realDistance} 
+                        <span className="text-xs text-emerald-400/60 font-medium ml-1">KM</span>
+                      </span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Preço/KM</label>
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-4 flex items-center gap-2">
+                      <span className="text-emerald-400 font-bold">{settings.currency}</span>
+                      <span className="text-xl font-bold">
+                        {settings.pricePerKm.toFixed(2)}
+                      </span>
+                    </div>
                   </div>
                 </div>
+
+                {/* Map Preview */}
                 <div className="space-y-2">
-                  <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Preço/KM</label>
-                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4 flex items-center gap-2">
-                    <span className="text-emerald-400 font-bold">{settings.currency}</span>
-                    <span className="text-xl font-bold">
-                      {settings.pricePerKm.toFixed(2)}
-                    </span>
+                  <div className="flex justify-between items-center px-1">
+                    <label className="text-[10px] uppercase tracking-widest text-white/40">Visualização do Percurso</label>
+                    <div className="flex items-center gap-1 text-[10px] text-emerald-400/60 font-medium">
+                      <Info size={10} />
+                      <span>Confira os pontos no mapa</span>
+                    </div>
+                  </div>
+                  <div className="h-48 rounded-3xl overflow-hidden border border-white/10 relative z-0">
+                    <MapContainer 
+                      center={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]} 
+                      zoom={13} 
+                      style={{ height: '100%', width: '100%' }}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      />
+                      <MapUpdater center={[destination.lat, destination.lon]} />
+                      <Marker position={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]}>
+                        <Popup>Origem: Atacadão</Popup>
+                      </Marker>
+                      <Marker position={[destination.lat, destination.lon]}>
+                        <Popup>Destino: {destination.label}</Popup>
+                      </Marker>
+                      <Polyline 
+                        positions={[
+                          [settings.fixedOrigin.lat, settings.fixedOrigin.lon],
+                          [destination.lat, destination.lon]
+                        ]} 
+                        color="#10b981" 
+                        weight={3}
+                        dashArray="5, 10"
+                      />
+                    </MapContainer>
                   </div>
                 </div>
               </motion.div>
@@ -525,18 +650,21 @@ export default function App() {
                           exit={{ opacity: 0, y: -10 }}
                           className="absolute top-full left-0 right-0 mt-2 bg-[#111] border border-white/10 rounded-2xl overflow-hidden z-[60] shadow-2xl max-h-48 overflow-y-auto"
                         >
-                          {originSuggestions.map((loc, idx) => (
+                          {originSuggestions.map((loc: any, idx) => (
                             <button 
                               key={idx}
                               onClick={() => {
                                 setTempOrigin(loc);
-                                setOriginQuery(loc.label);
+                                setOriginQuery(loc.displayLabel);
                                 setOriginSuggestions([]);
                               }}
-                              className="w-full px-4 py-3 text-left text-xs text-white/70 hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3"
+                              className="w-full px-4 py-3 text-left hover:bg-white/5 border-b border-white/5 last:border-none flex items-start gap-3 transition-colors"
                             >
-                              <Building2 size={14} className="mt-0.5 shrink-0 text-white/30" />
-                              <span className="line-clamp-2">{loc.label}</span>
+                              <Building2 size={14} className="mt-1 shrink-0 text-emerald-400/40" />
+                              <div className="flex flex-col">
+                                <span className="text-xs font-bold text-white/90 line-clamp-1">{loc.displayLabel}</span>
+                                <span className="text-[10px] text-white/40 uppercase tracking-wider">{loc.secondaryLabel}</span>
+                              </div>
                             </button>
                           ))}
                         </motion.div>
@@ -613,6 +741,14 @@ export default function App() {
 }
 
 // --- Subcomponents ---
+
+function MapUpdater({ center }: { center: [number, number] }) {
+  const map = useMap();
+  useEffect(() => {
+    map.setView(center, 14);
+  }, [center, map]);
+  return null;
+}
 
 function FeeCheckbox({ icon, label, active, onClick, value, currency }: { 
   icon: React.ReactNode, 
