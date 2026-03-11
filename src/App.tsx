@@ -57,12 +57,16 @@ interface CalculationResult {
 // --- Constants ---
 
 const DEFAULT_SETTINGS: AppSettings = {
-  fixedOrigin: { label: 'São Paulo, SP, Brasil', lat: -23.5505, lon: -46.6333 },
-  pricePerKm: 5.50,
-  extraWeightFee: 25.00,
-  badRoadFee: 15.00,
-  nightShiftFee: 30.00,
-  trafficFee: 10.00,
+  fixedOrigin: { 
+    label: 'Atacadão, Estrada Professor Leandro Faria Sarzedas, Village Rio das Ostras, Rio das Ostras, RJ, 28895-638, Brasil', 
+    lat: -22.5121, 
+    lon: -41.9285 
+  },
+  pricePerKm: 11.00,
+  extraWeightFee: 5.00,
+  badRoadFee: 5.00,
+  nightShiftFee: 5.00,
+  trafficFee: 5.00,
   currency: 'R$',
 };
 
@@ -107,15 +111,19 @@ export default function App() {
 
   // Load settings and history
   useEffect(() => {
-    const savedSettings = localStorage.getItem('geocalc_settings_v4');
+    const savedSettings = localStorage.getItem('geocalc_settings_v6');
     if (savedSettings) {
       const parsed = JSON.parse(savedSettings);
       setSettings(parsed);
       setTempOrigin(parsed.fixedOrigin);
       setOriginQuery(parsed.fixedOrigin.label);
+    } else {
+      // First time or version change: use defaults
+      setTempOrigin(DEFAULT_SETTINGS.fixedOrigin);
+      setOriginQuery(DEFAULT_SETTINGS.fixedOrigin.label);
     }
 
-    const savedHistory = localStorage.getItem('geocalc_history_v4');
+    const savedHistory = localStorage.getItem('geocalc_history_v6');
     if (savedHistory) setHistory(JSON.parse(savedHistory));
   }, []);
 
@@ -131,9 +139,17 @@ export default function App() {
   const fetchLocations = async (query: string) => {
     if (query.length < 3) return [];
     try {
-      // Nominatim search with addressdetails to help identify establishments
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=6&addressdetails=1&countrycodes=br`);
+      // Bounding box for Rio das Ostras, Macaé, Cabo Frio, São Pedro da Aldeia
+      // Format: left, top, right, bottom (lon, lat, lon, lat)
+      const viewbox = '-42.2,-22.3,-41.7,-23.0'; 
+      
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=8&addressdetails=1&countrycodes=br&viewbox=${viewbox}&bounded=0`;
+      
+      const response = await fetch(url);
       const data = await response.json();
+      
+      // Filter results to ensure they are at least in RJ if possible, 
+      // but Nominatim already biases with viewbox.
       return data.map((item: any) => ({
         label: item.display_name,
         lat: parseFloat(item.lat),
@@ -180,7 +196,7 @@ export default function App() {
   const saveSettings = () => {
     const newSettings = { ...settings, fixedOrigin: tempOrigin };
     setSettings(newSettings);
-    localStorage.setItem('geocalc_settings_v4', JSON.stringify(newSettings));
+    localStorage.setItem('geocalc_settings_v6', JSON.stringify(newSettings));
     setShowSettings(false);
   };
 
@@ -234,7 +250,7 @@ export default function App() {
       
       const newHistory = [result, ...history].slice(0, 10);
       setHistory(newHistory);
-      localStorage.setItem('geocalc_history_v4', JSON.stringify(newHistory));
+      localStorage.setItem('geocalc_history_v6', JSON.stringify(newHistory));
       setIsCalculating(false);
       
       // Reset search
@@ -400,7 +416,7 @@ export default function App() {
                   <p className="text-[10px] uppercase tracking-widest text-white/60 mb-1">Total Calculado</p>
                   <h2 className="text-4xl font-black tracking-tighter">
                     <span className="text-emerald-400 text-2xl mr-1">{settings.currency}</span>
-                    {currentResult.totalPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    {currentResult.totalPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </h2>
                 </div>
                 <div className="bg-white/10 p-3 rounded-2xl">
@@ -452,7 +468,7 @@ export default function App() {
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-bold text-emerald-400">
-                        {settings.currency} {item.totalPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        {settings.currency} {item.totalPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </p>
                     </div>
                   </div>
