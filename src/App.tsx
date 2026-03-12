@@ -87,24 +87,35 @@ const DEFAULT_SETTINGS: AppSettings = {
 // --- Utils ---
 
 /**
- * Fetches real driving distance between two points using OSRM API.
+ * Fetches real driving distance and geometry between two points using OSRM API.
  */
-async function fetchDrivingDistance(lat1: number, lon1: number, lat2: number, lon2: number): Promise<number> {
+async function fetchDrivingRoute(lat1: number, lon1: number, lat2: number, lon2: number): Promise<{ distance: number, geometry: [number, number][] }> {
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=false`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson`;
     const response = await fetch(url);
     const data = await response.json();
     
     if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+      const route = data.routes[0];
       // OSRM returns distance in meters
-      return data.routes[0].distance / 1000;
+      const distance = route.distance / 1000;
+      // GeoJSON coordinates are [lon, lat], Leaflet needs [lat, lon]
+      const geometry = route.geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]]);
+      return { distance, geometry };
     }
     
-    // Fallback to Haversine if OSRM fails
-    return calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4; // Add 40% as estimate for urban routes
+    const fallbackDist = calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
+    return { 
+      distance: fallbackDist, 
+      geometry: [[lat1, lon1], [lat2, lon2]] 
+    };
   } catch (error) {
     console.error('Routing error:', error);
-    return calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
+    const fallbackDist = calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
+    return { 
+      distance: fallbackDist, 
+      geometry: [[lat1, lon1], [lat2, lon2]] 
+    };
   }
 }
 
@@ -141,6 +152,7 @@ export default function App() {
 
   // Route State
   const [realDistance, setRealDistance] = useState<number>(0);
+  const [routeGeometry, setRouteGeometry] = useState<[number, number][]>([]);
   const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
 
   // Origin Search State (for Settings)
@@ -247,13 +259,14 @@ export default function App() {
     const updateRoute = async () => {
       if (destination) {
         setIsCalculatingRoute(true);
-        const dist = await fetchDrivingDistance(
+        const { distance, geometry } = await fetchDrivingRoute(
           settings.fixedOrigin.lat,
           settings.fixedOrigin.lon,
           destination.lat,
           destination.lon
         );
-        setRealDistance(parseFloat(dist.toFixed(2)));
+        setRealDistance(parseFloat(distance.toFixed(2)));
+        setRouteGeometry(geometry);
         setIsCalculatingRoute(false);
       }
     };
@@ -333,6 +346,7 @@ export default function App() {
       setDestQuery('');
       setDestination(null);
       setRealDistance(0);
+      setRouteGeometry([]);
       setActiveFees(new Set());
     }, 800);
   };
@@ -470,22 +484,21 @@ export default function App() {
                         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                       />
-                      <MapUpdater center={[destination.lat, destination.lon]} />
+                      <MapUpdater center={[destination.lat, destination.lon]} route={routeGeometry} />
                       <Marker position={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]}>
                         <Popup>Origem: Atacadão</Popup>
                       </Marker>
                       <Marker position={[destination.lat, destination.lon]}>
                         <Popup>Destino: {destination.label}</Popup>
                       </Marker>
-                      <Polyline 
-                        positions={[
-                          [settings.fixedOrigin.lat, settings.fixedOrigin.lon],
-                          [destination.lat, destination.lon]
-                        ]} 
-                        color="#10b981" 
-                        weight={3}
-                        dashArray="5, 10"
-                      />
+                      {routeGeometry.length > 0 && (
+                        <Polyline 
+                          positions={routeGeometry} 
+                          color="#10b981" 
+                          weight={4}
+                          opacity={0.8}
+                        />
+                      )}
                     </MapContainer>
                   </div>
                 </div>
@@ -742,11 +755,16 @@ export default function App() {
 
 // --- Subcomponents ---
 
-function MapUpdater({ center }: { center: [number, number] }) {
+function MapUpdater({ center, route }: { center: [number, number], route: [number, number][] }) {
   const map = useMap();
   useEffect(() => {
-    map.setView(center, 14);
-  }, [center, map]);
+    if (route && route.length > 1) {
+      const bounds = L.latLngBounds(route);
+      map.fitBounds(bounds, { padding: [30, 30] });
+    } else {
+      map.setView(center, 14);
+    }
+  }, [center, route, map]);
   return null;
 }
 
