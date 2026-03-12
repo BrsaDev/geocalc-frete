@@ -26,7 +26,7 @@ import {
   Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -43,6 +43,8 @@ L.Icon.Default.mergeOptions({
 
 interface Location {
   label: string;
+  displayLabel?: string;
+  secondaryLabel?: string;
   lat: number;
   lon: number;
 }
@@ -73,6 +75,8 @@ interface CalculationResult {
 const DEFAULT_SETTINGS: AppSettings = {
   fixedOrigin: { 
     label: 'Atacadão, Estrada Professor Leandro Faria Sarzedas, Village Rio das Ostras, Rio das Ostras, RJ, 28895-638, Brasil', 
+    displayLabel: 'Atacadão, Village Rio das Ostras',
+    secondaryLabel: 'Rio das Ostras, RJ',
     lat: -22.5121, 
     lon: -41.9285 
   },
@@ -87,35 +91,33 @@ const DEFAULT_SETTINGS: AppSettings = {
 // --- Utils ---
 
 /**
- * Fetches real driving distance and geometry between two points using OSRM API.
+ * Fetches multiple real driving distances and geometries between two points using OSRM API.
  */
-async function fetchDrivingRoute(lat1: number, lon1: number, lat2: number, lon2: number): Promise<{ distance: number, geometry: [number, number][] }> {
+async function fetchDrivingRoute(lat1: number, lon1: number, lat2: number, lon2: number): Promise<{ distance: number, geometry: [number, number][] }[]> {
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=3`;
     const response = await fetch(url);
     const data = await response.json();
     
     if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
-      const route = data.routes[0];
-      // OSRM returns distance in meters
-      const distance = route.distance / 1000;
-      // GeoJSON coordinates are [lon, lat], Leaflet needs [lat, lon]
-      const geometry = route.geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]]);
-      return { distance, geometry };
+      return data.routes.map((route: any) => ({
+        distance: route.distance / 1000,
+        geometry: route.geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]])
+      }));
     }
     
     const fallbackDist = calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
-    return { 
+    return [{ 
       distance: fallbackDist, 
       geometry: [[lat1, lon1], [lat2, lon2]] 
-    };
+    }];
   } catch (error) {
     console.error('Routing error:', error);
     const fallbackDist = calculateHaversineDistance(lat1, lon1, lat2, lon2) * 1.4;
-    return { 
+    return [{ 
       distance: fallbackDist, 
       geometry: [[lat1, lon1], [lat2, lon2]] 
-    };
+    }];
   }
 }
 
@@ -151,6 +153,8 @@ export default function App() {
   const [isSearchingDest, setIsSearchingDest] = useState(false);
 
   // Route State
+  const [availableRoutes, setAvailableRoutes] = useState<{ distance: number, geometry: [number, number][] }[]>([]);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
   const [realDistance, setRealDistance] = useState<number>(0);
   const [routeGeometry, setRouteGeometry] = useState<[number, number][]>([]);
   const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
@@ -191,20 +195,26 @@ export default function App() {
   const fetchLocations = async (query: string) => {
     if (query.length < 3) return [];
     try {
-      // Bounding box for Rio das Ostras, Macaé, Cabo Frio, São Pedro da Aldeia
-      // West: -42.2, North: -22.2, East: -41.6, South: -23.0
-      const viewbox = '-42.2,-22.2,-41.6,-23.0'; 
+      // Expanded Bounding box for the region
+      const viewbox = '-42.3,-22.1,-41.5,-23.1'; 
       
-      // We add "RJ" to help focus on the state
       let enhancedQuery = query;
       if (!query.toLowerCase().includes('rj') && !query.toLowerCase().includes('rio de janeiro')) {
-        enhancedQuery += ', RJ';
+        enhancedQuery += ', Rio de Janeiro';
       }
 
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(enhancedQuery)}&limit=12&addressdetails=1&countrycodes=br&viewbox=${viewbox}&bounded=0`;
+      const search = async (q: string, useViewbox: boolean) => {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=12&addressdetails=1&countrycodes=br${useViewbox ? `&viewbox=${viewbox}&bounded=0` : ''}`;
+        const resp = await fetch(url);
+        return await resp.json();
+      };
+
+      let data = await search(enhancedQuery, true);
       
-      const response = await fetch(url);
-      const data = await response.json();
+      // Fallback: if no results, try without viewbox and with a simpler query
+      if (data.length === 0) {
+        data = await search(query, false);
+      }
       
       return data.map((item: any) => {
         const addr = item.address;
@@ -238,7 +248,8 @@ export default function App() {
   // Debounced Destination Search
   useEffect(() => {
     const timer = setTimeout(async () => {
-      if (destQuery && (!destination || destQuery !== destination.label)) {
+      const currentLabel = destination?.displayLabel || destination?.label || '';
+      if (destQuery && destQuery !== currentLabel) {
         setIsSearchingDest(true);
         const results = await fetchLocations(destQuery);
         setDestSuggestions(results);
@@ -248,6 +259,9 @@ export default function App() {
         if (!destQuery) {
           setDestination(null);
           setRealDistance(0);
+          setRouteGeometry([]);
+          setAvailableRoutes([]);
+          setSelectedRouteIndex(0);
         }
       }
     }, 600);
@@ -257,26 +271,41 @@ export default function App() {
   // Real Driving Distance Effect
   useEffect(() => {
     const updateRoute = async () => {
-      if (destination) {
+      if (destination && settings.fixedOrigin) {
         setIsCalculatingRoute(true);
-        const { distance, geometry } = await fetchDrivingRoute(
+        const routes = await fetchDrivingRoute(
           settings.fixedOrigin.lat,
           settings.fixedOrigin.lon,
           destination.lat,
           destination.lon
         );
-        setRealDistance(parseFloat(distance.toFixed(2)));
-        setRouteGeometry(geometry);
+        setAvailableRoutes(routes);
+        setSelectedRouteIndex(0);
+        
+        if (routes.length > 0) {
+          setRealDistance(parseFloat(routes[0].distance.toFixed(2)));
+          setRouteGeometry(routes[0].geometry);
+        }
         setIsCalculatingRoute(false);
       }
     };
     updateRoute();
   }, [destination, settings.fixedOrigin]);
 
+  // Update active route when selection changes
+  useEffect(() => {
+    if (availableRoutes[selectedRouteIndex]) {
+      const route = availableRoutes[selectedRouteIndex];
+      setRealDistance(parseFloat(route.distance.toFixed(2)));
+      setRouteGeometry(route.geometry);
+    }
+  }, [selectedRouteIndex, availableRoutes]);
+
   // Debounced Origin Search (Settings)
   useEffect(() => {
     const timer = setTimeout(async () => {
-      if (originQuery && originQuery !== tempOrigin.label) {
+      const currentLabel = tempOrigin?.displayLabel || tempOrigin?.label || '';
+      if (originQuery && originQuery !== currentLabel) {
         setIsSearchingOrigin(true);
         const results = await fetchLocations(originQuery);
         setOriginSuggestions(results);
@@ -287,6 +316,43 @@ export default function App() {
     }, 600);
     return () => clearTimeout(timer);
   }, [originQuery, tempOrigin]);
+
+  // Manual Pinning Handlers
+  const handleMapClick = async (lat: number, lon: number, type: 'origin' | 'destination') => {
+    try {
+      const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`);
+      const data = await response.json();
+      
+      const addr = data.address;
+      const name = data.name || addr.road || addr.pedestrian || "Local Marcado";
+      const neighborhood = addr.suburb || addr.neighbourhood || addr.city_district || addr.village;
+      const city = addr.city || addr.town || addr.municipality;
+      const state = addr.state || 'RJ';
+      
+      const displayLabel = neighborhood ? `${name}, ${neighborhood}` : name;
+      const secondaryLabel = city ? (state ? `${city}, ${state}` : city) : state;
+
+      const newLoc: Location = {
+        label: data.display_name,
+        displayLabel,
+        secondaryLabel,
+        lat,
+        lon
+      };
+
+      if (type === 'destination') {
+        setDestination(newLoc);
+        setDestQuery(displayLabel);
+        setDestSuggestions([]);
+      } else {
+        setTempOrigin(newLoc);
+        setOriginQuery(displayLabel);
+        setOriginSuggestions([]);
+      }
+    } catch (error) {
+      console.error('Reverse geocoding error:', error);
+    }
+  };
 
   // Save settings
   const saveSettings = () => {
@@ -392,7 +458,15 @@ export default function App() {
           {/* Destination Search Section */}
           <section className="space-y-4">
             <div className="space-y-2 relative">
-              <label className="text-[10px] uppercase tracking-widest text-white/40 ml-1">Destino Final</label>
+              <div className="flex justify-between items-center px-1">
+                <label className="text-[10px] uppercase tracking-widest text-white/40">Destino Final</label>
+                {!destination && (
+                  <div className="flex items-center gap-1 text-[10px] text-emerald-400/60 font-medium">
+                    <MapPin size={10} />
+                    <span>Toque no mapa abaixo para marcar</span>
+                  </div>
+                )}
+              </div>
               <div className="bg-white/5 border border-white/10 rounded-2xl p-4 backdrop-blur-xl flex items-center gap-3 focus-within:border-emerald-500/50 transition-colors">
                 <Search size={18} className="text-white/40" />
                 <input 
@@ -402,7 +476,19 @@ export default function App() {
                   onChange={(e) => setDestQuery(e.target.value)}
                   className="w-full bg-transparent border-none focus:ring-0 text-sm placeholder:text-white/20 p-0"
                 />
-                {(isSearchingDest || isCalculatingRoute) && <Loader2 size={16} className="animate-spin text-emerald-400" />}
+                {destQuery && (
+                  <button 
+                    onClick={() => {
+                      setDestQuery('');
+                      setDestination(null);
+                      setDestSuggestions([]);
+                    }} 
+                    className="p-1 hover:bg-white/10 rounded-full text-white/40 shrink-0"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+                {(isSearchingDest || isCalculatingRoute) && <Loader2 size={16} className="animate-spin text-emerald-400 shrink-0" />}
               </div>
 
               {/* Suggestions Dropdown */}
@@ -433,8 +519,47 @@ export default function App() {
                     ))}
                   </motion.div>
                 )}
+                {destQuery.length >= 3 && destSuggestions.length === 0 && !isSearchingDest && !destination && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="absolute top-full left-0 right-0 mt-2 bg-red-500/10 border border-red-500/20 rounded-2xl p-4 z-50 backdrop-blur-md"
+                  >
+                    <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">
+                      Endereço não encontrado. Use o mapa abaixo para marcar o local exato.
+                    </p>
+                  </motion.div>
+                )}
               </AnimatePresence>
             </div>
+
+            {!destination && (
+              <div className="h-64 rounded-3xl overflow-hidden border border-white/5 relative z-0 opacity-80 grayscale hover:grayscale-0 hover:opacity-100 transition-all cursor-crosshair">
+                <MapContainer 
+                  center={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]} 
+                  zoom={12} 
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl={false}
+                >
+                  <TileLayer
+                    url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                  />
+                  <MapEvents onClick={(lat, lon) => handleMapClick(lat, lon, 'destination')} />
+                  <Marker position={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]}>
+                    <Popup>Origem: {settings.fixedOrigin.displayLabel || settings.fixedOrigin.label}</Popup>
+                  </Marker>
+                </MapContainer>
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className={`bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 flex items-center gap-2 transition-all ${destQuery.length >= 3 && destSuggestions.length === 0 ? 'scale-110 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.2)]' : ''}`}>
+                    <MapPin size={14} className={`${destQuery.length >= 3 && destSuggestions.length === 0 ? 'text-emerald-400 animate-bounce' : 'text-emerald-400'}`} />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">
+                      {destQuery.length >= 3 && destSuggestions.length === 0 ? 'Não achou? Toque aqui no mapa' : 'Toque para marcar destino'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {destination && (
               <motion.div 
@@ -464,6 +589,46 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Route Selection */}
+                {availableRoutes.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between px-1">
+                      <label className="text-[10px] uppercase tracking-widest text-white/40">
+                        {availableRoutes.length > 1 ? 'Alternativas de Rota' : 'Rota Encontrada'}
+                      </label>
+                      <span className="text-[10px] text-emerald-400/60 font-bold uppercase tracking-widest">
+                        {availableRoutes.length > 1 ? `${availableRoutes.length} opções disponíveis` : 'Caminho único'}
+                      </span>
+                    </div>
+                    <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                      {availableRoutes.slice(0, 5).map((route, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setSelectedRouteIndex(idx)}
+                          className={`shrink-0 px-4 py-3 rounded-2xl border transition-all flex flex-col items-start gap-1 min-w-[110px] ${
+                            selectedRouteIndex === idx 
+                              ? 'bg-emerald-500/20 border-emerald-500 text-emerald-100 shadow-[0_0_15px_rgba(16,185,129,0.1)]' 
+                              : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <div className={`w-1.5 h-1.5 rounded-full ${selectedRouteIndex === idx ? 'bg-emerald-400' : 'bg-white/20'}`} />
+                            <span className="text-[10px] font-bold uppercase tracking-widest">
+                              {idx === 0 ? 'Principal' : `Opção ${idx + 1}`}
+                            </span>
+                          </div>
+                          <span className="text-sm font-bold">{route.distance.toFixed(2)} <span className="text-[10px] opacity-60">KM</span></span>
+                        </button>
+                      ))}
+                      {availableRoutes.length === 1 && (
+                        <div className="shrink-0 px-4 py-3 rounded-2xl border border-dashed border-white/10 bg-transparent flex items-center justify-center min-w-[110px]">
+                          <span className="text-[9px] text-white/20 uppercase tracking-tighter text-center leading-tight">Sem outras<br/>alternativas</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Map Preview */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center px-1">
@@ -485,6 +650,7 @@ export default function App() {
                         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                       />
                       <MapUpdater center={[destination.lat, destination.lon]} route={routeGeometry} />
+                      <MapEvents onClick={(lat, lon) => handleMapClick(lat, lon, 'destination')} />
                       <Marker position={[settings.fixedOrigin.lat, settings.fixedOrigin.lon]}>
                         <Popup>Origem: Atacadão</Popup>
                       </Marker>
@@ -685,6 +851,29 @@ export default function App() {
                     </AnimatePresence>
                   </div>
 
+                  {/* Manual Pin for Origin */}
+                  <div className="h-32 rounded-2xl overflow-hidden border border-white/10 relative z-0 cursor-crosshair">
+                    <MapContainer 
+                      center={[tempOrigin.lat, tempOrigin.lon]} 
+                      zoom={14} 
+                      style={{ height: '100%', width: '100%' }}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      />
+                      <MapEvents onClick={(lat, lon) => handleMapClick(lat, lon, 'origin')} />
+                      <MapUpdater center={[tempOrigin.lat, tempOrigin.lon]} route={[]} />
+                      <Marker position={[tempOrigin.lat, tempOrigin.lon]}>
+                        <Popup>Origem Atual</Popup>
+                      </Marker>
+                    </MapContainer>
+                    <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-md px-2 py-1 rounded-md border border-white/10 pointer-events-none">
+                      <span className="text-[8px] font-bold uppercase tracking-widest">Toque para mudar origem</span>
+                    </div>
+                  </div>
+
                   <SettingsInput 
                     label="Valor por KM" 
                     value={settings.pricePerKm} 
@@ -754,6 +943,15 @@ export default function App() {
 }
 
 // --- Subcomponents ---
+
+function MapEvents({ onClick }: { onClick: (lat: number, lon: number) => void }) {
+  useMapEvents({
+    click(e) {
+      onClick(e.latlng.lat, e.latlng.lng);
+    },
+  });
+  return null;
+}
 
 function MapUpdater({ center, route }: { center: [number, number], route: [number, number][] }) {
   const map = useMap();
